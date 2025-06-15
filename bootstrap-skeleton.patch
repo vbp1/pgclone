@@ -1,0 +1,146 @@
+From: pgclone <noreply@pgclone.io>
+Date: Sat, 15 Jun 2025 20:10:00 +0300
+Subject: [PATCH] bootstrap: stub implementations for client, agent and internal modules
+
+---
+ cmd/agent/main.go             | 10 ++++++++++
+ cmd/client/main.go            | 10 ++++++++++
+ internal/agent/agent.go       | 10 ++++++++++
+ internal/client/client.go     | 10 ++++++++++
+ internal/grpcapi/grpc.go      | 11 +++++++++++
+ internal/pgutils/backup.go    | 11 +++++++++++
+ internal/ssh/ssh.go           | 11 +++++++++++
+ internal/syncer/sync.go       | 11 +++++++++++
+ internal/walstream/stream.go  | 11 +++++++++++
+ tests/e2e_test.go             |  7 +++++++
+ tests/unit_test.go            |  7 +++++++
+ 11 files changed, 109 insertions(+)
+
+diff --git a/cmd/agent/main.go b/cmd/agent/main.go
+index 0000000..aaaaaaaa
+--- /dev/null
++++ b/cmd/agent/main.go
+@@
++package main
++
++import "fmt"
++
++func main() {
++    fmt.Println("pgclone agent stub running")
++    // TODO: initialize gRPC server, auth, etc.
++}
+diff --git a/cmd/client/main.go b/cmd/client/main.go
+index 0000000..bbbbbbbb
+--- /dev/null
++++ b/cmd/client/main.go
+@@
++package main
++
++import "fmt"
++
++func main() {
++    fmt.Println("pgclone client stub running")
++    // TODO: parse flags, run sync logic
++}
+diff --git a/internal/agent/agent.go b/internal/agent/agent.go
+index 0000000..cccccccc
+--- /dev/null
++++ b/internal/agent/agent.go
+@@
++package agent
++
++func Run() error {
++    // TODO: implement agent main loop
++    return nil
++}
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 0000000..dddddddd
+--- /dev/null
++++ b/internal/client/client.go
+@@
++package client
++
++func Run() error {
++    // TODO: implement client coordination logic
++    return nil
++}
+diff --git a/internal/grpcapi/grpc.go b/internal/grpcapi/grpc.go
+index 0000000..eeeeeeee
+--- /dev/null
++++ b/internal/grpcapi/grpc.go
+@@
++package grpcapi
++
++// TODO: define gRPC server/client and proto bindings
++
++func Init() {
++    // Placeholder
++}
+diff --git a/internal/pgutils/backup.go b/internal/pgutils/backup.go
+index 0000000..ffffffff
+--- /dev/null
++++ b/internal/pgutils/backup.go
+@@
++package pgutils
++
++func StartBackup() error {
++    return nil
++}
++
++func StopBackup() error {
++    return nil
++}
+diff --git a/internal/ssh/ssh.go b/internal/ssh/ssh.go
+index 0000000..1010101
+--- /dev/null
++++ b/internal/ssh/ssh.go
+@@
++package ssh
++
++func LaunchAgent() error {
++    return nil
++}
+diff --git a/internal/syncer/sync.go b/internal/syncer/sync.go
+index 0000000..1212121
+--- /dev/null
++++ b/internal/syncer/sync.go
+@@
++package syncer
++
++func SyncPGDATA() error {
++    return nil
++}
+diff --git a/internal/walstream/stream.go b/internal/walstream/stream.go
+index 0000000..1313131
+--- /dev/null
++++ b/internal/walstream/stream.go
+@@
++package walstream
++
++func StartStream() error {
++    return nil
++}
+diff --git a/tests/e2e_test.go b/tests/e2e_test.go
+index 0000000..1414141
+--- /dev/null
++++ b/tests/e2e_test.go
+@@
++package tests
++
++import "testing"
++
++func TestE2EStub(t *testing.T) {
++    t.Log("E2E test stub")
++}
+diff --git a/tests/unit_test.go b/tests/unit_test.go
+index 0000000..1515151
+--- /dev/null
++++ b/tests/unit_test.go
+@@
++package tests
++
++import "testing"
++
++func TestUnitStub(t *testing.T) {
++    t.Log("unit test stub")
++}
