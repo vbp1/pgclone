@@ -1,0 +1,14 @@
+project_name: pgclone
+builds:
+  - main: ./cmd/client/main.go
+    binary: pgclone
+    goos: [linux]
+    goarch: [amd64]
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+snapshot:
+  name_template: "next"

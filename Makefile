@@ -6,8 +6,7 @@ BUILD_DIR=./dist
 all: lint test build
 
 build:
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/client
-	go build -o $(BUILD_DIR)/$(BINARY_NAME)-agent ./cmd/agent
+	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/pgclone
 
 lint:
 	staticcheck ./...
@@ -21,18 +20,3 @@ release:
 install:
 	go install ./...
 
---- goreleaser.yaml ---
-project_name: pgclone
-builds:
-  - main: ./cmd/client/main.go
-    binary: pgclone
-    goos: [linux]
-    goarch: [amd64]
-archives:
-  - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files:
-      - LICENSE
-      - README.md
-snapshot:
-  name_template: "next"
