@@ -10,7 +10,7 @@ build:
 test:
 	go test -v ./...
 
-GOLANGCI_LINT_VERSION ?= 1.57.2
+GOLANGCI_LINT_VERSION ?= latest
 
 TOOLS_BIN := $(GOPATH)/bin
 
@@ -22,7 +22,6 @@ install-tools:
 
 lint:
 	@which golangci-lint >/dev/null || { echo "golangci-lint not found. Run 'make install-tools' first."; exit 1; }
-	@test "$$(golangci-lint --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)" = "$(GOLANGCI_LINT_VERSION)" || { echo "golangci-lint version mismatch. Run 'make install-tools'."; exit 1; }
 	golangci-lint run
 
 docker-test:
