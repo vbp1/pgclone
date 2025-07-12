@@ -1,13 +1,17 @@
 version: 2
+
 run:
   timeout: 5m
 
 linters:
   enable:
-    - gofumpt
     - govet
     - staticcheck
 
-linters-settings:
+formatters:
+  enable:
+    - gofumpt
+
+formatters-settings:
   gofumpt:
     extra-rules: true 
