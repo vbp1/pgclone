@@ -1,20 +1,33 @@
 package postgres
 
-import "testing"
+import (
+	"context"
+	"testing"
 
-func TestPrettyBytes(t *testing.T) {
-	cases := []struct {
-		in   int64
-		want string
-	}{
-		{500, "500 bytes"},
-		{1024, "1.00 kB"},
-		{1024*1024 + 512*1024, "1.50 MB"},
+	pgxmock "github.com/pashagolub/pgxmock/v3"
+)
+
+func TestStreamRows_HandlerCalled(t *testing.T) {
+	ctx := context.Background()
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("mock init: %v", err)
 	}
-	for _, c := range cases {
-		got := PrettyBytes(c.in)
-		if got != c.want {
-			t.Errorf("PrettyBytes(%d)=%s, want %s", c.in, got, c.want)
-		}
+	defer mock.Close()
+
+	rows := pgxmock.NewRows([]string{"id"}).AddRow(1).AddRow(2).AddRow(3)
+	mock.ExpectQuery("SELECT id FROM test").WillReturnRows(rows)
+
+	var count int
+	h := func(_ []any) error { count++; return nil }
+
+	if err := StreamRows(ctx, mock, "SELECT id FROM test", nil, 1, h); err != nil {
+		t.Fatalf("StreamRows: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 rows, got %d", count)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }
