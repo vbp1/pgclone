@@ -1,5 +1,7 @@
 # Makefile for pgclone (Go port)
 
+export PATH := $(HOME)/go/bin:$(PATH)
+
 .PHONY: build test lint docker-test
 
 build:
