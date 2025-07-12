@@ -1,9 +1,10 @@
 package cli
 
 import (
-	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
+	"github.com/vbp1/pgclone/internal/log"
 )
 
 // Config holds values of CLI flags
@@ -37,9 +38,13 @@ var cfg = &Config{}
 var RootCmd = &cobra.Command{
 	Use:   "pgclone",
 	Short: "Clone a PostgreSQL instance via rsync + WAL streaming (Go rewrite)",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Initialize global logger once flags parsed
+		slog.Debug("setting up logger")
+		log.Setup(cfg.Debug, cfg.Verbose)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: invoke core application logic when implemented
-		fmt.Println("pgclone CLI skeleton – flags parsed successfully")
+		slog.Info("pgclone CLI skeleton – flags parsed successfully")
 		return nil
 	},
 }
