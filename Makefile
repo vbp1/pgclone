@@ -22,7 +22,7 @@ install-tools:
 
 lint:
 	@which golangci-lint >/dev/null || { echo "golangci-lint not found. Run 'make install-tools' first."; exit 1; }
-	golangci-lint run
+	golangci-lint run ./...
 
 docker-test:
 	docker compose -f testdata/docker-compose.yml up --build --abort-on-container-exit 
