@@ -53,7 +53,7 @@ This document outlines the high-level milestones and concrete tasks required to 
 |----|------|-------------|
 | 4.1 | ✅ Establish connection pool via `pgx/v5` | ENV-driven credentials |
 | 4.2 | ✅ Implement helper(s): version check ≥15, tablespace discovery, `pg_size_pretty` equivalence | |
-| 4.3 | Persistent psql session replacement → simple `pgx` query helper | streaming results |
+| 4.3 | ✅ Persistent psql session replacement → simple `pgx` query helper | streaming results |
 
 ---
 
