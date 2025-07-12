@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/spf13/cobra"
 	"github.com/vbp1/pgclone/internal/log"
+	"github.com/vbp1/pgclone/internal/util/signalctx"
 )
 
 // Config holds values of CLI flags
@@ -45,6 +47,10 @@ var RootCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		slog.Info("pgclone CLI skeleton – flags parsed successfully")
+		ctx, cancel, _ := signalctx.WithSignals(context.Background())
+		defer cancel()
+		<-ctx.Done()
+		slog.Info("Shutting down gracefully")
 		return nil
 	},
 }
