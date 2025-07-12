@@ -30,8 +30,8 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Details |
 |----|------|---------|
-| 2.1 | Introduce `spf13/cobra` (or std `flag`) for argument parsing | Mirrors current Bash flags |
-| 2.2 | Generate stub commands & global flags | `cmd/pgclone/root.go` |
+| 2.1 | ✅ Introduce `spf13/cobra` (or std `flag`) for argument parsing | Mirrors current Bash flags |
+| 2.2 | ✅ Generate stub commands & global flags | `cmd/pgclone/root.go` |
 | 2.3 | Wire JSON/YAML config file support (`viper`) | Optional config loading |
 
 ---
