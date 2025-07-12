@@ -42,7 +42,7 @@ This document outlines the high-level milestones and concrete tasks required to 
 |----|------|---------|
 | 3.1 | ✅ Logging subsystem using `log/slog` with levels & timestamps | stdout/stderr separation |
 | 3.2 | ✅ Graceful shutdown: context + `os/signal` | Handles `INT`, `TERM`, `ERR` analogues |
-| 3.3 | Disk space helpers (wrap `syscall.Statfs`) | Cross-platform abstraction |
+| 3.3 | ✅ Disk space helpers (wrap `syscall.Statfs`) | Cross-platform abstraction |
 | 3.4 | File/dir utilities (`mkdir-p`, cleanup helpers) | |
 
 ---
