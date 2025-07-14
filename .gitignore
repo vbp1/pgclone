@@ -7,9 +7,14 @@ wrong-key.pub
 *.log
 *.tmp
 pgclone
+integration.test
 # cursor files
 .cursor/
 prompt.*
 # claude files
 CLAUDE.md
 .mcp.json
+# copilot files
+.github/copilot-instructions.md
+# cline
+.clinerules/
