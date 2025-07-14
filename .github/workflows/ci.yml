@@ -1,10 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches: ["feat/pgclone-go"]
   pull_request:
-    branches: ["feat/pgclone-go"]
+    branches: ["main"]
 
 jobs:
   build-test-lint:
@@ -17,8 +15,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # Use Go 1.23.x (latest patch) to match the version declared in go.mod
+          go-version: '1.23.x'
           cache: true
+
+      # Ensure automatic toolchain download is enabled. This makes `go` fetch
+      # the exact version specified in the `toolchain` directive of go.mod
+      # (go1.23.11) if it differs from the pre-installed gotip binary.
+      - name: Enable Go toolchain auto-download
+        run: echo "GOTOOLCHAIN=auto" >> $GITHUB_ENV
 
       - name: Download dependencies
         run: go mod download
