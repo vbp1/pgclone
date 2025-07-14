@@ -10,7 +10,7 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Notes |
 |----|------|-------|
-| 0.2 | Agree Go tool-chain version (≥1.22) & update `.tool-versions` / CI matrix | |
+| 0.2 | ✅ Agree Go tool-chain version (≥1.23) & update `.tool-versions` / CI matrix | Go 1.23 toolchain configured, CI uses 1.23 |
 | 0.3 | Define minimal supported OSes (Linux only) and architectures (amd64 only) | |
 
 ---
@@ -61,9 +61,9 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Description |
 |----|------|-------------|
-| 5.1 | Wrapper for executing & supervising external commands (`rsync`, `pg_receivewal`) | `exec.Cmd` with context & logging |
-| 5.2 | Implement watchdog goroutine (kill children when parent dies) | Replaces Bash watchdog PIDs |
-| 5.3 | Parse `rsync --stats` output into struct for later aggregation | Regex/Scanner-based parser + tests |
+| 5.1 | ✅ Wrapper for executing & supervising external commands (`rsync`, `pg_receivewal`) | `exec.Cmd` with context & logging |
+| 5.2 | ✅ Implement watchdog goroutine (kill children when parent dies) | Replaces Bash watchdog PIDs |
+| 5.3 | ✅ Parse `rsync --stats` output into struct for later aggregation | Regex/Scanner-based parser + tests |
 
 ---
 
@@ -71,9 +71,9 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Description |
 |----|------|-------------|
-| 6.1 | Evaluate using native OpenSSH binary vs Go SSH library (`x/crypto/ssh`) | Prefer library to avoid binary dependency |
-| 6.2 | Implement helper to run remote shell commands, capture stdout/stderr, return exit status | Respects `INSECURE_SSH` flag |
-| 6.3 | Implement remote `rsyncd` bootstrap: create dir, upload conf & secrets, launch daemon, relay chosen port | Matches Bash logic |
+| 6.1 | ✅ Evaluate using native OpenSSH binary vs Go SSH library (`x/crypto/ssh`) | Prefer library to avoid binary dependency |
+| 6.2 | ✅ Implement helper to run remote shell commands, capture stdout/stderr, return exit status | Respects `INSECURE_SSH` flag |
+| 6.3 | ✅ Implement remote `rsyncd` bootstrap: create dir, upload conf & secrets, launch daemon, relay chosen port | Matches Bash logic |
 
 ---
 
@@ -81,11 +81,11 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Description |
 |----|------|-------------|
-| 7.1 | Implement file list acquisition via `rsync --list-only` | Collect & sort by size |
-| 7.2 | Re-implement “ring-hop heuristic” file distribution across workers | Pure Go algorithm + unit tests |
-| 7.3 | Spawn parallel `rsync` workers using calculated file chunks | stream progress via pipes |
-| 7.4 | Progress bar integration (mpb) *or* plain TTY output | `--progress-mode` parity |
-| 7.5 | Aggregate per-worker stats into global view | real-time & final summary |
+| 7.1 | ✅ Implement file list acquisition via `rsync --list-only` | Collect & sort by size |
+| 7.2 | ✅ Re-implement “ring-hop heuristic” file distribution across workers | Pure Go algorithm + unit tests |
+| 7.3 | ✅ Spawn parallel `rsync` workers using calculated file chunks | stream progress via pipes |
+| 7.4 | ✅ Progress bar integration (mpb) *or* plain TTY output | `--progress-mode` parity |
+| 7.5 | ✅ Aggregate per-worker stats into global view | real-time & final summary |
 
 ---
 
@@ -93,8 +93,8 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Description |
 |----|------|-------------|
-| 8.1 | Minimal viable product: keep external `pg_receivewal` | Manage directory & logs |
-| 8.2 | Wait for replica to appear in `pg_stat_replication` (poll via pgx) | timeout handling |
+| 8.1 | ✅ Minimal viable product: keep external `pg_receivewal` | Manage directory & logs |
+| 8.2 | ✅ Wait for replica to appear in `pg_stat_replication` (poll via pgx) | timeout handling |
 | 8.3 | Future: research pure Go replication protocol (optional stretch goal) | |
 
 ---
@@ -103,9 +103,9 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 | ID | Task | Description |
 |----|------|-------------|
-| 9.1 | Implement temp dir lifecycle & `--keep-run-tmp` flag | `os.RemoveAll` guards |
-| 9.2 | File locking for concurrent runs (`flock` ➜ `github.com/gofrs/flock`) | Hash of `REPLICA_PGDATA` path |
-| 9.3 | Comprehensive `defer` chain to teardown processes & temp data on exit | mirrors `cleanup()` Bash |
+| 9.1 | ✅ Implement temp dir lifecycle & `--keep-run-tmp` flag | `os.RemoveAll` guards |
+| 9.2 | ✅ File locking for concurrent runs (`flock` ➜ `github.com/gofrs/flock`) | Hash of `REPLICA_PGDATA` path |
+| 9.3 | ✅ Comprehensive `defer` chain to teardown processes & temp data on exit | mirrors `cleanup()` Bash |
 
 ---
 
@@ -119,7 +119,7 @@ This document outlines the high-level milestones and concrete tasks required to 
 
 Additional tasks:
 - Generate test fixtures (small PGDATA) for quick unit runs.
-- Add GitHub Actions workflow `ci.yml` (lint, test).
+- ✅ Add GitHub Actions workflow `ci.yml` (lint, test).
 
 ---
 
@@ -127,8 +127,25 @@ Additional tasks:
 
 | ID | Task | Output |
 |----|------|--------|
-| 11.1 | Update `README.md` with Go installation & usage examples | English |
-| 11.2 | Add architecture diagram (`docs/architecture.md`) | mermaid diagram |
+| 11.1 | ✅ Update `README.md` with Go installation & usage examples | English |
+| 11.2 | ✅ Add architecture diagram (`docs/architecture.md`) | mermaid diagram |
+
+---
+
+## Phase 12 – Orchestrator (Clone Pipeline)
+
+| ID | Task | Description |
+|----|------|-------------|
+| 12.1 | ✅ Implement `internal/clone` package with orchestrator type and `Run(ctx, cfg)` | Base skeleton, unit-testable |
+| 12.2 | ✅ Wire orchestrator into `internal/cli/root.go` replacing passive wait | invoke clone.Run, keep existing cleanup/lock logic |
+| 12.3 | ✅ Start WAL receiver & wait replication (`wal.Receiver`, `postgres.WaitReplicationStarted`) | step 1 |
+| 12.4 | ✅ Bootstrap remote `rsyncd` daemon via SSH (`ssh.Client` + dynamic port) | step 2 |
+| 12.5 | ✅ Call `pg_backup_start` on primary via persistent *same* `pgx.Conn`, capture **START LSN** | step 3 – MUST use the same session as 12.7 |
+| 12.6 | ✅ Initial rsync of PGDATA (exclude base/pg_wal) + parallel rsync of `base/` & tablespaces (`rsync` pkg) | step 4 |
+| 12.7 | ✅ Call `pg_backup_stop` **on the very same pgx.Conn**, obtain **STOP LSN**, fetch `pg_control`/label/maps | step 5 |
+| 12.8 | ✅ Wait for WAL containing STOP LSN, stop receiver, move WAL to final `pg_wal`, rename `.partial` | step 6 |
+| 12.9 | ✅ Final validation: required files present, chmod, summary log | step 7 |
+| 12.10 | ✅ Update integration test: remove sleep entrypoint, expect successful `pgclone` exit | |
 
 ---
 

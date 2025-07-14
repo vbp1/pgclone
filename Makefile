@@ -2,10 +2,10 @@
 
 export PATH := $(HOME)/go/bin:$(PATH)
 
-.PHONY: build test lint docker-test
+.PHONY: build test lint docker-test integration-build integration-test
 
 build:
-	go build ./...
+	CGO_ENABLED=0 go build ./...
 
 test:
 	go test -v ./...
@@ -26,3 +26,11 @@ lint:
 
 docker-test:
 	docker compose -f testdata/docker-compose.yml up --build --abort-on-container-exit 
+
+# Build Linux/amd64 binary and place it into integration/docker for Dockerfile COPY
+integration-build:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o integration/docker/pgclone ./cmd/pgclone
+
+# Run integration tests (requires Docker/Compose running locally)
+integration-test: integration-build
+	go test -tags=integration ./integration -v 

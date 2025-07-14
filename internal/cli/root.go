@@ -2,10 +2,16 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/spf13/cobra"
+
+	"github.com/vbp1/pgclone/internal/clone"
+	"github.com/vbp1/pgclone/internal/debug"
+	"github.com/vbp1/pgclone/internal/lock"
 	"github.com/vbp1/pgclone/internal/log"
+	"github.com/vbp1/pgclone/internal/runctx"
 	"github.com/vbp1/pgclone/internal/util/signalctx"
 )
 
@@ -38,19 +44,75 @@ var cfg = &Config{}
 
 // RootCmd is the main entry point invoked from cmd/pgclone
 var RootCmd = &cobra.Command{
-	Use:   "pgclone",
-	Short: "Clone a PostgreSQL instance via rsync + WAL streaming (Go rewrite)",
+	Use:           "pgclone",
+	Short:         "Clone a PostgreSQL instance via rsync + WAL streaming (Go rewrite)",
+	SilenceUsage:  true, // do not show usage on error
+	SilenceErrors: true, // let RunE handle logging
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Initialize global logger once flags parsed
 		slog.Debug("setting up logger")
 		log.Setup(cfg.Debug, cfg.Verbose)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		slog.Info("pgclone CLI skeleton – flags parsed successfully")
+		slog.Info("pgclone starting")
+
+		debug.StopIf("before-main")
+
+		// per-run temp dir
+		rc, err := runctx.New("pgclone_run_", cfg.KeepRunTmp)
+		if err != nil {
+			return err
+		}
+		slog.Debug("run temp dir", "dir", rc.Dir)
+		defer func() {
+			if err := rc.Cleanup(); err != nil {
+				slog.Warn("cleanup temp", "err", err)
+			}
+		}()
+
+		// file lock on replica PGDATA (must be provided at this point)
+		if cfg.ReplicaPGData == "" {
+			return fmt.Errorf("--replica-pgdata required before running")
+		}
+		lk := lock.New(cfg.ReplicaPGData)
+		ok, err := lk.TryLock()
+		if err != nil {
+			return fmt.Errorf("acquire lock: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("another pgclone process is running for %s", cfg.ReplicaPGData)
+		}
+		defer func() { _ = lk.Unlock() }()
+
+		// main context with signals
 		ctx, cancel, _ := signalctx.WithSignals(context.Background())
 		defer cancel()
-		<-ctx.Done()
-		slog.Info("Shutting down gracefully")
+		// build orchestrator config (avoid import cycle)
+		cloneCfg := &clone.Config{
+			PGHost:        cfg.PGHost,
+			PGPort:        cfg.PGPort,
+			PGUser:        cfg.PGUser,
+			PrimaryPGData: cfg.PrimaryPGData,
+			ReplicaPGData: cfg.ReplicaPGData,
+			ReplicaWALDir: cfg.ReplicaWALDir,
+			SSHKey:        cfg.SSHKey,
+			SSHUser:       cfg.SSHUser,
+			InsecureSSH:   cfg.InsecureSSH,
+			TempWALDir:    cfg.TempWALDir,
+			UseSlot:       cfg.UseSlot,
+			Parallel:      cfg.Parallel,
+			Paranoid:      cfg.Paranoid,
+			Verbose:       cfg.Verbose,
+			KeepRunTmp:    cfg.KeepRunTmp,
+			Progress:      cfg.Progress,
+			ProgressInt:   cfg.ProgressInt,
+		}
+
+		if err := clone.Run(ctx, cloneCfg); err != nil {
+			return err
+		}
+
+		slog.Info("pgclone finished successfully")
 		return nil
 	},
 }

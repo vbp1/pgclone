@@ -1,0 +1,15 @@
+# local test SSH keys
+test-key
+test-key.pub
+wrong-key
+wrong-key.pub
+# temporary files
+*.log
+*.tmp
+pgclone
+# cursor files
+.cursor/
+prompt.*
+# claude files
+CLAUDE.md
+.mcp.json
