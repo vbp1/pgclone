@@ -1,0 +1,24 @@
+version: '3.9'
+services:
+  pg-primary:
+    build:
+      context: ./docker
+      args:
+        ROLE: primary
+    image: pgclone-go-demo
+    environment:
+      POSTGRES_PASSWORD: postgres
+    networks: [pgclone]
+  pg-replica:
+    build:
+      context: ./docker
+      args:
+        ROLE: replica
+    image: pgclone-go-demo
+    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    environment:
+      POSTGRES_PASSWORD: postgres
+    networks: [pgclone]
+networks:
+  pgclone:
+    driver: bridge 
