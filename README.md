@@ -1,6 +1,6 @@
 # pgclone (Go Edition)
 
-**pgclone** is a Go rewrite of the original Bash utility that prepares a physical PostgreSQL replica using high-speed `rsync` file transfer and live WAL streaming.  It preserves the proven workflow of the shell script while adding type-safe code, rich tests and modern CI/CD.()
+**pgclone** is a Go rewrite of the original Bash utility (https://github.com/vbp1/pgclone.sh) that prepares a physical PostgreSQL replica using high-speed `rsync` file transfer and live WAL streaming.  It preserves the proven workflow of the shell script.
 
 ---
 
