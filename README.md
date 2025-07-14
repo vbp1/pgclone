@@ -1,8 +1,6 @@
 # pgclone (Go Edition)
 
-**pgclone** is a Go rewrite of the original Bash utility that prepares a physical PostgreSQL replica using high-speed `rsync` file transfer and live WAL streaming.  It preserves the proven workflow of the shell script while adding type-safe code, rich tests and modern CI/CD.
-
-> The conversational language with the team remains **Russian**.  All code comments, commit messages, branch names and documentation are written in **English** per project policy.
+**pgclone** is a Go rewrite of the original Bash utility that prepares a physical PostgreSQL replica using high-speed `rsync` file transfer and live WAL streaming.  It preserves the proven workflow of the shell script while adding type-safe code, rich tests and modern CI/CD.()
 
 ---
 
@@ -70,14 +68,33 @@ Flags mirror the original Bash script; run `pgclone --help` for the full list.
 ## Directory Layout
 
 ```text
-cmd/pgclone          – CLI entry-point (cobra)
-internal/cli         – flag parsing & config
-internal/postgres    – pgx helpers (version check, tablespaces, wait functions)
-internal/rsync       – list parser, distributor, parallel runner, stats
-internal/wal         – pg_receivewal wrapper
-internal/runctx      – per-run temp dir lifecycle
-internal/lock        – file lock based on gofrs/flock
-internal/util/...    – misc helpers (fs, disk, signalctx, logging)
+cmd/pgclone             – CLI entry point (Cobra)
+
+# Core workflow
+internal/cli            – flag parsing & global config
+internal/clone          – orchestrator that coordinates the whole clone pipeline
+
+# Functional subsystems
+internal/postgres       – pgx helpers (version checks, tablespaces, wait helpers)
+internal/rsync          – rsync list parser, distributor, parallel workers, stats
+internal/wal            – pg_receivewal wrapper
+internal/ssh            – SSH helpers (remote execution, key setup)
+
+# Infrastructure
+internal/runctx         – per-run temp dir lifecycle
+internal/lock           – file locking based on gofrs/flock
+internal/process        – subprocess helpers & watchdogs
+internal/log            – slog logger setup
+internal/debug          – low-overhead dev breakpoints (`debug.StopIf`)
+
+# Misc utilities
+internal/util/disk      – disk space helpers
+internal/util/fs        – filesystem utilities (mkdir-p, safe remove)
+internal/util/signalctx – context cancellation on OS signals
+
+# Auxiliary
+integration/            – Docker-Compose integration tests (build tag `integration`)
+docs/                   – architecture docs & diagrams
 ```
 
 ---
