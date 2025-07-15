@@ -12,22 +12,37 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
-	"golang.org/x/sys/unix"
 )
+
+// workerWriter wraps a writer with atomic close state
+type workerWriter struct {
+	writer io.Writer
+	closed int64 // atomic boolean: 0 = open, 1 = closed
+}
+
+func (w *workerWriter) Write(p []byte) (n int, err error) {
+	if atomic.LoadInt64(&w.closed) != 0 {
+		return 0, io.ErrClosedPipe
+	}
+	return w.writer.Write(p)
+}
+
+func (w *workerWriter) Close() error {
+	atomic.StoreInt64(&w.closed, 1)
+	return nil
+}
 
 // RunParallel starts N rsync workers to transfer provided files to dstDir.
 // It blocks until all workers finish or ctx is canceled.
 // Returned error – first non-zero exit or context cancellation.
 func RunParallel(ctx context.Context, cfg Config, module string, workers int, files []FileInfo, dstDir string, showBar bool, progressMode string, progressInterval int) (Stats, error) {
 	if workers <= 0 {
-		workers = runtime.NumCPU() / 2
-		if workers == 0 {
-			workers = 1
-		}
+		workers = max(runtime.NumCPU()/2, 1)
 	}
 
 	const flushInterval = 500 * time.Millisecond
@@ -100,13 +115,22 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// WaitGroup for workers
+	// Create shared pipes for progress and stats
+	progressReader, progressWriter := io.Pipe()
+	statsReader, statsWriter := io.Pipe()
+
+	// WaitGroup for workers and goroutines
 	var wg sync.WaitGroup
 	errCh := make(chan error, workers)
 	statsCh := make(chan Stats, workers)
 
-	// Start single plain progress printer goroutine (once)
+	// Channel to signal when all workers are done writing
+	workersFinished := make(chan struct{})
+
+	// Start plain progress printer as separate goroutine if needed
+	var plainDone chan struct{}
 	if showPlain {
+		plainDone = make(chan struct{})
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -117,6 +141,8 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 				select {
 				case <-ctx.Done():
 					return
+				case <-plainDone:
+					return
 				case <-ticker.C:
 					progressMu.Lock()
 					current := progressBytes
@@ -125,10 +151,7 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 					elapsed := time.Since(startTime)
 					percent := int64(0)
 					if totalBytes > 0 {
-						percent = (current * 100) / totalBytes
-						if percent > 100 {
-							percent = 100
-						}
+						percent = min((current*100)/totalBytes, 100)
 					}
 
 					speed := int64(0)
@@ -161,7 +184,84 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		}()
 	}
 
+	// Start consolidated progress tracking goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer progressReader.Close()
+		
+		br := bufio.NewReaderSize(progressReader, 256*1024)
+		pending := 0
+		lastFlush := time.Now()
+		
+		for {
+			line, err := br.ReadBytes('\n')
+			if len(line) > 0 {
+				if bar != nil || showPlain {
+					if n, ok := parseSizeBytes(line); ok && n > 0 {
+						if bar != nil {
+							pending += int(n)
+						}
+						if showPlain {
+							progressMu.Lock()
+							progressBytes += n
+							progressMu.Unlock()
+						}
+					}
+				}
+			}
+			flush := false
+			if pending > 0 && (time.Since(lastFlush) > flushInterval || err == io.EOF) {
+				flush = true
+			}
+			if flush && bar != nil {
+				bar.IncrBy(pending)
+				pending = 0
+				lastFlush = time.Now()
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				break
+			}
+		}
+		
+		if showPlain && plainDone != nil {
+			close(plainDone)
+		}
+	}()
+
+	// Start consolidated stderr/logging/stats goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer statsReader.Close()
+		
+		var statsBuf bytes.Buffer
+		sc := bufio.NewScanner(statsReader)
+		for sc.Scan() {
+			line := sc.Text()
+			slog.Debug("rsync", "line", line)
+			statsBuf.WriteString(line)
+			statsBuf.WriteByte('\n')
+		}
+		
+		// Parse stats after reading complete
+		if st, err := ParseStats(bufio.NewScanner(bytes.NewReader(statsBuf.Bytes()))); err == nil {
+			select {
+			case statsCh <- st:
+			case <-ctx.Done():
+				// Don't block if context is cancelled
+			}
+		}
+	}()
+
+	// Separate WaitGroup for workers only
+	var workersWG sync.WaitGroup
+
 	// Launch workers
+	var workerWriters []*workerWriter
 	for idx, bucket := range buckets {
 		if len(bucket) == 0 {
 			continue
@@ -170,126 +270,93 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		if err := writeFiles(listPath, bucket); err != nil {
 			return Stats{}, err
 		}
-		// ### DEBUG CODE: worker start log
-		// slog.Info("rsync worker start", "idx", idx, "files", len(bucket), "list", listPath)
 
-		// we assume same module for all (base), caller may call per module separately
-		// module := "base" // This line is removed as per the new_code
-		cmd := cfg.BuildCmd(ctx, module, listPath, dstDir)
-		// ensure %l output format to get transferred size per file
-		cmd.Args = append([]string{cmd.Args[0]}, append([]string{"--out-format=%l"}, cmd.Args[1:]...)...)
+		// Build rsync command
+		rsyncCmd := cfg.BuildCmd(ctx, module, listPath, dstDir)
+		rsyncCmd.Args = append([]string{rsyncCmd.Args[0]}, append([]string{"--out-format=%l"}, rsyncCmd.Args[1:]...)...)
+
+		// Create awk pass-through commands for stdout and stderr with flush
+		awkStdout := exec.CommandContext(ctx, "awk", "{print; fflush()}")
+		awkStderr := exec.CommandContext(ctx, "awk", "{print; fflush()}")
+
+		// Connect rsync outputs to awk inputs
+		awkStdout.Stdin, _ = rsyncCmd.StdoutPipe()
+		awkStderr.Stdin, _ = rsyncCmd.StderrPipe()
 
 		// create per-worker log file
 		logPath := filepath.Join(tmpDir, fmt.Sprintf("worker_%d.log", idx))
-		logFile, _ := os.Create(logPath) // ошибки игнорируем – не критично
+		logFile, _ := os.Create(logPath)
 
-		stdout, _ := cmd.StdoutPipe()
-		errPipe, _ := cmd.StderrPipe()
+		// Create worker-specific writers for shared pipes
+		progressWorkerWriter := &workerWriter{writer: progressWriter}
+		statsWorkerWriter := &workerWriter{writer: statsWriter}
+		workerWriters = append(workerWriters, progressWorkerWriter, statsWorkerWriter)
 
-		// enlarge pipe buffer to 1 MiB to reduce blocking
-		if f, ok := stdout.(*os.File); ok {
-			_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
-		}
-		if f, ok := errPipe.(*os.File); ok {
-			_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
-		}
-		var stderr io.Reader = errPipe
+		// Connect awk outputs to shared pipes
 		if logFile != nil {
-			stderr = io.TeeReader(errPipe, logFile)
+			awkStdout.Stdout = io.MultiWriter(progressWorkerWriter, logFile)
+			awkStderr.Stderr = io.MultiWriter(statsWorkerWriter, logFile)
+		} else {
+			awkStdout.Stdout = progressWorkerWriter
+			awkStderr.Stderr = statsWorkerWriter
 		}
-		var statsBuf bytes.Buffer
-		var statsMu sync.Mutex
 
-		if err := cmd.Start(); err != nil {
+		// Store awk commands for proper lifecycle management
+		var awkCommands []*exec.Cmd
+		awkCommands = append(awkCommands, awkStdout, awkStderr)
+
+		// Start rsync command first
+		if err := rsyncCmd.Start(); err != nil {
 			return Stats{}, err
 		}
 
-		// Progress tracking goroutine
-		wg.Add(1)
-		go func(r io.Reader) {
-			defer wg.Done()
-			br := bufio.NewReaderSize(r, 256*1024)
-			pending := 0
-			lastFlush := time.Now()
-			for {
-				line, err := br.ReadBytes('\n')
-				if len(line) > 0 {
-					statsMu.Lock()
-					statsBuf.Write(line)
-					statsMu.Unlock()
-					if bar != nil || showPlain {
-						if n, ok := parseSizeBytes(line); ok && n > 0 {
-							if bar != nil {
-								pending += int(n)
-							}
-							if showPlain {
-								progressMu.Lock()
-								progressBytes += n
-								progressMu.Unlock()
-							}
-						}
-					}
-				}
-				flush := false
-				if pending > 0 && (time.Since(lastFlush) > flushInterval || err == io.EOF) {
-					flush = true
-				}
-				if flush && bar != nil {
-					bar.IncrBy(pending)
-					pending = 0
-					lastFlush = time.Now()
-				}
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					break
-				}
+		// Start awk commands
+		for _, awkCmd := range awkCommands {
+			if err := awkCmd.Start(); err != nil {
+				return Stats{}, err
 			}
-			if logFile != nil {
-				_ = logFile.Close()
-			}
-		}(stdout)
+		}
 
-		// Plain progress printer goroutine will be started once after launching all workers
-
-		// read stderr, log and collect for stats
-		wg.Add(1)
-		go func(r io.Reader) {
-			defer wg.Done()
-			sc := bufio.NewScanner(r)
-			for sc.Scan() {
-				line := sc.Text()
-				slog.Debug("rsync", "line", line)
-				statsMu.Lock()
-				statsBuf.WriteString(line)
-				statsBuf.WriteByte('\n')
-				statsMu.Unlock()
+		workersWG.Add(1)
+		go func(rsync *exec.Cmd, awks []*exec.Cmd, widx int, lf *os.File) {
+			defer workersWG.Done()
+			
+			// Wait for rsync to finish first
+			rsyncErr := rsync.Wait()
+			
+			// Then wait for awk commands to finish processing remaining data
+			for _, awkCmd := range awks {
+				awkCmd.Wait()
 			}
-			// parse stats after reading complete
-			if st, err := ParseStats(bufio.NewScanner(bytes.NewReader(statsBuf.Bytes()))); err == nil {
-				statsCh <- st
+			
+			// Report error if rsync failed
+			if rsyncErr != nil {
+				errCh <- rsyncErr
 			}
-		}(stderr)
-
-		wg.Add(1)
-		go func(c *exec.Cmd, widx int) {
-			defer wg.Done()
-			if err := c.Wait(); err != nil {
-				// ### DEBUG CODE: worker finished with error
-				// slog.Info("rsync worker done with error", "idx", widx, "err", err)
-				errCh <- err
+			
+			if lf != nil {
+				_ = lf.Close()
 			}
-			// ### DEBUG CODE: worker finished successfully
-			// slog.Info("rsync worker done", "idx", widx, "err", nil)
-		}(cmd, idx)
+		}(rsyncCmd, awkCommands, idx, logFile)
 	}
 
-	// Wait for all goroutines
-	done := make(chan struct{})
+	// Start goroutine to close shared pipes when all workers are done
 	go func() {
+		// Wait for all worker goroutines to finish
+		workersWG.Wait()
+		
+		// Close all worker writers first
+		for _, w := range workerWriters {
+			w.Close()
+		}
+		
+		// Close write ends of pipes to signal readers to finish
+		progressWriter.Close()
+		statsWriter.Close()
+		
+		// Now wait for readers to finish and signal completion
 		wg.Wait()
-		close(done)
+		close(workersFinished)
 	}()
 
 	var total Stats
@@ -299,7 +366,7 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		return total, ctx.Err()
 	case err := <-errCh:
 		return total, err
-	case <-done:
+	case <-workersFinished:
 		// Complete the bar to exactly 100%
 		if bar != nil && p != nil {
 			// Calculate remaining bytes to reach 100%
@@ -310,9 +377,23 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			bar.SetTotal(totalBytes, true) // mark as complete
 			p.Wait()
 		}
+		
+		// Close statsCh and collect remaining stats with timeout protection
 		close(statsCh)
-		for st := range statsCh {
-			total = total.Add(st)
+		timeout := time.After(1 * time.Second)
+	statsLoop:
+		for {
+			select {
+			case st, ok := <-statsCh:
+				if !ok {
+					// Channel closed, no more stats
+					break statsLoop
+				}
+				total = total.Add(st)
+			case <-timeout:
+				// Timeout protection - don't wait forever for stats
+				break statsLoop
+			}
 		}
 		return total, nil
 	}
