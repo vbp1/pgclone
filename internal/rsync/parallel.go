@@ -23,6 +23,8 @@ import (
 // It blocks until all workers finish or ctx is canceled.
 // Returned error – first non-zero exit or context cancellation.
 func RunParallel(ctx context.Context, cfg Config, module string, workers int, files []FileInfo, dstDir string, showBar bool, progressMode string, progressInterval int) (Stats, error) {
+	start := time.Now()
+	
 	if workers <= 0 {
 		workers = max(runtime.NumCPU()/2, 1)
 	}
@@ -250,6 +252,30 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			return Stats{}, err
 		}
 
+		// Calculate worker statistics for debugging
+		var workerTotalSize int64
+		var workerLargestFile int64
+		var workerSmallestFile int64 = files[0].Size // Initialize with first file size
+		
+		for _, f := range bucket {
+			workerTotalSize += f.Size
+			if f.Size > workerLargestFile {
+				workerLargestFile = f.Size
+			}
+			if f.Size < workerSmallestFile {
+				workerSmallestFile = f.Size
+			}
+		}
+		
+		slog.Info("worker starting", 
+			"worker_id", idx,
+			"module", module,
+			"file_count", len(bucket),
+			"total_size_gb", float64(workerTotalSize)/(1024*1024*1024),
+			"largest_file_gb", float64(workerLargestFile)/(1024*1024*1024),
+			"smallest_file_mb", float64(workerSmallestFile)/(1024*1024),
+			"avg_file_mb", float64(workerTotalSize/int64(len(bucket)))/(1024*1024))
+
 		// Build rsync command
 		rsyncCmd := cfg.BuildCmd(ctx, module, listPath, dstDir)
 		rsyncCmd.Args = append([]string{rsyncCmd.Args[0]}, append([]string{"--out-format=%l"}, rsyncCmd.Args[1:]...)...)
@@ -303,8 +329,10 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		}
 
 		workersWG.Add(1)
-		go func(rsync *exec.Cmd, awks []*exec.Cmd, widx int, lf *os.File) {
+		go func(rsync *exec.Cmd, awks []*exec.Cmd, widx int, lf *os.File, workerStats map[string]interface{}) {
 			defer workersWG.Done()
+			
+			startTime := time.Now()
 			
 			// Context-aware cleanup function - close file only on context cancel
 			cleanup := func() {
@@ -316,12 +344,16 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			done := make(chan struct{})
 			var rsyncErr error
 			var awkErrors []error
+			var rsyncStartTime time.Time
+			var rsyncEndTime time.Time
 			
 			go func() {
 				defer close(done)
 				
 				// Wait for rsync to finish first
+				rsyncStartTime = time.Now()
 				rsyncErr = rsync.Wait()
+				rsyncEndTime = time.Now()
 				
 				// Wait for awk commands to finish processing remaining data
 				for i, awkCmd := range awks {
@@ -335,7 +367,15 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			select {
 			case <-ctx.Done():
 				// Context cancelled - force kill all processes
-				slog.Debug("context cancelled, killing processes", "worker", widx)
+				totalTime := time.Since(startTime)
+				slog.Warn("worker cancelled", 
+					"worker_id", widx,
+					"module", module,
+					"status", "context_cancelled",
+					"total_time_sec", totalTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
 				rsync.Process.Kill()
 				for _, awkCmd := range awks {
 					if awkCmd.Process != nil {
@@ -356,12 +396,38 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			
 			// Report error if rsync failed (priority over awk errors)
 			if rsyncErr != nil {
+				totalTime := time.Since(startTime)
+				rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+				
+				slog.Error("worker failed", 
+					"worker_id", widx,
+					"module", module,
+					"status", "rsync_error",
+					"error", rsyncErr.Error(),
+					"total_time_sec", totalTime.Seconds(),
+					"rsync_time_sec", rsyncTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
 				errCh <- rsyncErr
 				return
 			}
 			
 			// Report awk errors only if rsync succeeded
 			if len(awkErrors) > 0 {
+				totalTime := time.Since(startTime)
+				rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+				
+				slog.Error("worker failed", 
+					"worker_id", widx,
+					"module", module,
+					"status", "awk_error",
+					"error", fmt.Sprintf("awk errors: %v", awkErrors),
+					"total_time_sec", totalTime.Seconds(),
+					"rsync_time_sec", rsyncTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
 				errCh <- fmt.Errorf("worker %d awk errors: %v", widx, awkErrors)
 				return
 			}
@@ -371,18 +437,54 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 				lf.Close() // Close for reading
 				if content, err := os.ReadFile(lf.Name()); err == nil {
 					if st, err := ParseStats(bufio.NewScanner(bytes.NewReader(content))); err == nil {
-						slog.Debug("worker stats parsed", "worker", widx, "files", st.NumFiles, "transferred_size", st.TotalTransferredSize)
+						totalTime := time.Since(startTime)
+						rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+						
+						// Calculate transfer rate
+						var transferRate float64
+						if totalTime.Seconds() > 0 {
+							transferRate = float64(st.BytesReceived) / (1024 * 1024) / totalTime.Seconds()
+						}
+						
+						slog.Info("worker completed", 
+							"worker_id", widx,
+							"module", module,
+							"status", "success",
+							"total_time_sec", totalTime.Seconds(),
+							"rsync_time_sec", rsyncTime.Seconds(),
+							"setup_time_sec", (totalTime - rsyncTime).Seconds(),
+							"files_processed", st.NumFiles,
+							"files_transferred", st.RegTransferred,
+							"bytes_received_gb", float64(st.BytesReceived)/(1024*1024*1024),
+							"bytes_sent_mb", float64(st.BytesSent)/(1024*1024),
+							"transfer_rate_mbps", transferRate,
+							"literal_data_gb", float64(st.LiteralData)/(1024*1024*1024),
+							"matched_data_gb", float64(st.MatchedData)/(1024*1024*1024),
+							"initial_file_count", workerStats["file_count"],
+							"initial_total_size_gb", workerStats["total_size_gb"],
+							"initial_largest_file_gb", workerStats["largest_file_gb"],
+							"initial_smallest_file_mb", workerStats["smallest_file_mb"],
+							"initial_avg_file_mb", workerStats["avg_file_mb"])
+						
 						select {
 						case statsCh <- st:
 						case <-ctx.Done():
 							// Don't block if context is cancelled
 						}
 					} else {
-						slog.Debug("worker stats parse error", "worker", widx, "error", err)
+						slog.Error("worker stats parse error", "worker", widx, "error", err)
 					}
+				} else {
+					slog.Error("worker log file read error", "worker", widx, "error", err)
 				}
 			}
-		}(rsyncCmd, startedAwkCommands, idx, logFile)
+		}(rsyncCmd, startedAwkCommands, idx, logFile, map[string]interface{}{
+			"file_count": len(bucket),
+			"total_size_gb": float64(workerTotalSize)/(1024*1024*1024),
+			"largest_file_gb": float64(workerLargestFile)/(1024*1024*1024),
+			"smallest_file_mb": float64(workerSmallestFile)/(1024*1024),
+			"avg_file_mb": float64(workerTotalSize/int64(len(bucket)))/(1024*1024),
+		})
 	}
 
 	// Start goroutine to close shared pipes when all workers are done
@@ -446,6 +548,15 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			// Override BytesReceived with the accurate progress counter
 			total.BytesReceived = accurateProgressBytes
 		}
+		
+		// Log summary statistics for all workers
+		slog.Info("all workers completed", 
+			"module", module,
+			"total_workers", workers,
+			"total_bytes_received_gb", float64(total.BytesReceived)/(1024*1024*1024),
+			"total_files_processed", total.NumFiles,
+			"total_files_transferred", total.RegTransferred,
+			"total_time_sec", time.Since(start).Seconds())
 		
 		return total, nil
 	}
