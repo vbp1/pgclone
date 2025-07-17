@@ -16,18 +16,17 @@ import (
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
-	"golang.org/x/sys/unix"
 )
+
 
 // RunParallel starts N rsync workers to transfer provided files to dstDir.
 // It blocks until all workers finish or ctx is canceled.
 // Returned error – first non-zero exit or context cancellation.
 func RunParallel(ctx context.Context, cfg Config, module string, workers int, files []FileInfo, dstDir string, showBar bool, progressMode string, progressInterval int) (Stats, error) {
+	start := time.Now()
+	
 	if workers <= 0 {
-		workers = runtime.NumCPU() / 2
-		if workers == 0 {
-			workers = 1
-		}
+		workers = max(runtime.NumCPU()/2, 1)
 	}
 
 	const flushInterval = 500 * time.Millisecond
@@ -100,13 +99,22 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// WaitGroup for workers
+	// Create shared pipes for progress and stats
+	progressReader, progressWriter := io.Pipe()
+	statsReader, statsWriter := io.Pipe()
+
+	// WaitGroup for workers and goroutines
 	var wg sync.WaitGroup
 	errCh := make(chan error, workers)
 	statsCh := make(chan Stats, workers)
 
-	// Start single plain progress printer goroutine (once)
+	// Channel to signal when all workers are done writing
+	workersFinished := make(chan struct{})
+
+	// Start plain progress printer as separate goroutine if needed
+	var plainDone chan struct{}
 	if showPlain {
+		plainDone = make(chan struct{})
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -117,6 +125,8 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 				select {
 				case <-ctx.Done():
 					return
+				case <-plainDone:
+					return
 				case <-ticker.C:
 					progressMu.Lock()
 					current := progressBytes
@@ -125,10 +135,7 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 					elapsed := time.Since(startTime)
 					percent := int64(0)
 					if totalBytes > 0 {
-						percent = (current * 100) / totalBytes
-						if percent > 100 {
-							percent = 100
-						}
+						percent = min((current*100)/totalBytes, 100)
 					}
 
 					speed := int64(0)
@@ -161,6 +168,80 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		}()
 	}
 
+	// Start consolidated progress tracking goroutine  
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer progressReader.Close()
+		
+		br := bufio.NewReaderSize(progressReader, 256*1024)
+		pending := 0
+		lastFlush := time.Now()
+		lineCount := 0
+		
+		for {
+			line, err := br.ReadBytes('\n')
+			if len(line) > 0 {
+				lineCount++
+				slog.Debug("rsync stdout", "line_num", lineCount, "line", string(line))
+				
+				if bar != nil || showPlain {
+					if n, ok := parseSizeBytes(line); ok && n > 0 {
+						if bar != nil {
+							pending += int(n)
+						}
+						if showPlain {
+							progressMu.Lock()
+							progressBytes += n
+							progressMu.Unlock()
+						}
+					}
+				}
+			}
+			flush := false
+			if pending > 0 && (time.Since(lastFlush) > flushInterval || err == io.EOF) {
+				flush = true
+			}
+			if flush && bar != nil {
+				bar.IncrBy(pending)
+				pending = 0
+				lastFlush = time.Now()
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				break
+			}
+		}
+		
+		slog.Debug("rsync stdout complete", "total_lines", lineCount)
+		
+		if showPlain && plainDone != nil {
+			close(plainDone)
+		}
+	}()
+
+	// Start consolidated stderr/logging goroutine - just for logging, no stats parsing
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer statsReader.Close()
+		
+		lineCount := 0
+		sc := bufio.NewScanner(statsReader)
+		for sc.Scan() {
+			line := sc.Text()
+			lineCount++
+			slog.Debug("rsync stderr", "line_num", lineCount, "line", line)
+		}
+		
+		slog.Debug("rsync stderr complete", "total_lines", lineCount)
+	}()
+
+	// Separate WaitGroup for workers only
+	var workersWG sync.WaitGroup
+
 	// Launch workers
 	for idx, bucket := range buckets {
 		if len(bucket) == 0 {
@@ -170,126 +251,254 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		if err := writeFiles(listPath, bucket); err != nil {
 			return Stats{}, err
 		}
-		// ### DEBUG CODE: worker start log
-		// slog.Info("rsync worker start", "idx", idx, "files", len(bucket), "list", listPath)
 
-		// we assume same module for all (base), caller may call per module separately
-		// module := "base" // This line is removed as per the new_code
-		cmd := cfg.BuildCmd(ctx, module, listPath, dstDir)
-		// ensure %l output format to get transferred size per file
-		cmd.Args = append([]string{cmd.Args[0]}, append([]string{"--out-format=%l"}, cmd.Args[1:]...)...)
+		// Calculate worker statistics for debugging
+		var workerTotalSize int64
+		var workerLargestFile int64
+		var workerSmallestFile int64 = files[0].Size // Initialize with first file size
+		
+		for _, f := range bucket {
+			workerTotalSize += f.Size
+			if f.Size > workerLargestFile {
+				workerLargestFile = f.Size
+			}
+			if f.Size < workerSmallestFile {
+				workerSmallestFile = f.Size
+			}
+		}
+		
+		slog.Info("worker starting", 
+			"worker_id", idx,
+			"module", module,
+			"file_count", len(bucket),
+			"total_size_gb", float64(workerTotalSize)/(1024*1024*1024),
+			"largest_file_gb", float64(workerLargestFile)/(1024*1024*1024),
+			"smallest_file_mb", float64(workerSmallestFile)/(1024*1024),
+			"avg_file_mb", float64(workerTotalSize/int64(len(bucket)))/(1024*1024))
+
+		// Build rsync command
+		rsyncCmd := cfg.BuildCmd(ctx, module, listPath, dstDir)
+		rsyncCmd.Args = append([]string{rsyncCmd.Args[0]}, append([]string{"--out-format=%l"}, rsyncCmd.Args[1:]...)...)
+
+		// Create awk pass-through commands for stdout and stderr with flush
+		awkStdout := exec.CommandContext(ctx, "awk", "{print; fflush()}")
+		awkStderr := exec.CommandContext(ctx, "awk", "{print; fflush()}")
+
+		// Connect rsync outputs to awk inputs
+		awkStdout.Stdin, _ = rsyncCmd.StdoutPipe()
+		awkStderr.Stdin, _ = rsyncCmd.StderrPipe()
 
 		// create per-worker log file
 		logPath := filepath.Join(tmpDir, fmt.Sprintf("worker_%d.log", idx))
-		logFile, _ := os.Create(logPath) // ошибки игнорируем – не критично
+		logFile, _ := os.Create(logPath)
 
-		stdout, _ := cmd.StdoutPipe()
-		errPipe, _ := cmd.StderrPipe()
+		// Use shared pipes directly - no need for workerWriter wrapper
+		progressWorkerWriter := progressWriter
+		statsWorkerWriter := statsWriter
 
-		// enlarge pipe buffer to 1 MiB to reduce blocking
-		if f, ok := stdout.(*os.File); ok {
-			_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
-		}
-		if f, ok := errPipe.(*os.File); ok {
-			_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
-		}
-		var stderr io.Reader = errPipe
+		// Connect awk outputs to shared pipes
 		if logFile != nil {
-			stderr = io.TeeReader(errPipe, logFile)
+			awkStdout.Stdout = io.MultiWriter(progressWorkerWriter, logFile)
+			awkStderr.Stdout = io.MultiWriter(statsWorkerWriter, logFile)
+		} else {
+			awkStdout.Stdout = progressWorkerWriter
+			awkStderr.Stdout = statsWorkerWriter
 		}
-		var statsBuf bytes.Buffer
-		var statsMu sync.Mutex
 
-		if err := cmd.Start(); err != nil {
+		// Store awk commands for proper lifecycle management
+		var awkCommands []*exec.Cmd
+		awkCommands = append(awkCommands, awkStdout, awkStderr)
+
+		// Start rsync command first
+		if err := rsyncCmd.Start(); err != nil {
 			return Stats{}, err
 		}
 
-		// Progress tracking goroutine
-		wg.Add(1)
-		go func(r io.Reader) {
-			defer wg.Done()
-			br := bufio.NewReaderSize(r, 256*1024)
-			pending := 0
-			lastFlush := time.Now()
-			for {
-				line, err := br.ReadBytes('\n')
-				if len(line) > 0 {
-					statsMu.Lock()
-					statsBuf.Write(line)
-					statsMu.Unlock()
-					if bar != nil || showPlain {
-						if n, ok := parseSizeBytes(line); ok && n > 0 {
-							if bar != nil {
-								pending += int(n)
-							}
-							if showPlain {
-								progressMu.Lock()
-								progressBytes += n
-								progressMu.Unlock()
-							}
+		// Start awk commands with proper error handling
+		var startedAwkCommands []*exec.Cmd
+		for i, awkCmd := range awkCommands {
+			if err := awkCmd.Start(); err != nil {
+				// Cleanup: kill rsync and any already started awk commands
+				rsyncCmd.Process.Kill()
+				for _, started := range startedAwkCommands {
+					started.Process.Kill()
+				}
+				return Stats{}, fmt.Errorf("failed to start awk command %d: %w", i, err)
+			}
+			startedAwkCommands = append(startedAwkCommands, awkCmd)
+		}
+
+		workersWG.Add(1)
+		go func(rsync *exec.Cmd, awks []*exec.Cmd, widx int, lf *os.File, workerStats map[string]interface{}) {
+			defer workersWG.Done()
+			
+			startTime := time.Now()
+			
+			// Context-aware cleanup function - close file only on context cancel
+			cleanup := func() {
+				// File will be closed and read after successful completion
+			}
+			defer cleanup()
+			
+			// Channel to handle context cancellation
+			done := make(chan struct{})
+			var rsyncErr error
+			var awkErrors []error
+			var rsyncStartTime time.Time
+			var rsyncEndTime time.Time
+			
+			go func() {
+				defer close(done)
+				
+				// Wait for rsync to finish first
+				rsyncStartTime = time.Now()
+				rsyncErr = rsync.Wait()
+				rsyncEndTime = time.Now()
+				
+				// Wait for awk commands to finish processing remaining data
+				for i, awkCmd := range awks {
+					if err := awkCmd.Wait(); err != nil {
+						slog.Debug("awk command failed", "worker", widx, "awk_idx", i, "error", err)
+						awkErrors = append(awkErrors, err)
+					}
+				}
+			}()
+			
+			select {
+			case <-ctx.Done():
+				// Context cancelled - force kill all processes
+				totalTime := time.Since(startTime)
+				slog.Warn("worker cancelled", 
+					"worker_id", widx,
+					"module", module,
+					"status", "context_cancelled",
+					"total_time_sec", totalTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
+				rsync.Process.Kill()
+				for _, awkCmd := range awks {
+					if awkCmd.Process != nil {
+						awkCmd.Process.Kill()
+					}
+				}
+				// Wait for cleanup to complete
+				<-done
+				// Close log file on context cancel
+				if lf != nil {
+					lf.Close()
+				}
+				errCh <- ctx.Err()
+				return
+			case <-done:
+				// Normal completion
+			}
+			
+			// Report error if rsync failed (priority over awk errors)
+			if rsyncErr != nil {
+				totalTime := time.Since(startTime)
+				rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+				
+				slog.Error("worker failed", 
+					"worker_id", widx,
+					"module", module,
+					"status", "rsync_error",
+					"error", rsyncErr.Error(),
+					"total_time_sec", totalTime.Seconds(),
+					"rsync_time_sec", rsyncTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
+				errCh <- rsyncErr
+				return
+			}
+			
+			// Report awk errors only if rsync succeeded
+			if len(awkErrors) > 0 {
+				totalTime := time.Since(startTime)
+				rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+				
+				slog.Error("worker failed", 
+					"worker_id", widx,
+					"module", module,
+					"status", "awk_error",
+					"error", fmt.Sprintf("awk errors: %v", awkErrors),
+					"total_time_sec", totalTime.Seconds(),
+					"rsync_time_sec", rsyncTime.Seconds(),
+					"initial_file_count", workerStats["file_count"],
+					"initial_total_size_gb", workerStats["total_size_gb"])
+				
+				errCh <- fmt.Errorf("worker %d awk errors: %v", widx, awkErrors)
+				return
+			}
+
+			// Parse worker's stats from log file if rsync succeeded
+			if lf != nil {
+				lf.Close() // Close for reading
+				if content, err := os.ReadFile(lf.Name()); err == nil {
+					if st, err := ParseStats(bufio.NewScanner(bytes.NewReader(content))); err == nil {
+						totalTime := time.Since(startTime)
+						rsyncTime := rsyncEndTime.Sub(rsyncStartTime)
+						
+						// Calculate transfer rate
+						var transferRate float64
+						if totalTime.Seconds() > 0 {
+							transferRate = float64(st.BytesReceived) / (1024 * 1024) / totalTime.Seconds()
 						}
+						
+						slog.Info("worker completed", 
+							"worker_id", widx,
+							"module", module,
+							"status", "success",
+							"total_time_sec", totalTime.Seconds(),
+							"rsync_time_sec", rsyncTime.Seconds(),
+							"setup_time_sec", (totalTime - rsyncTime).Seconds(),
+							"files_processed", st.NumFiles,
+							"files_transferred", st.RegTransferred,
+							"bytes_received_gb", float64(st.BytesReceived)/(1024*1024*1024),
+							"bytes_sent_mb", float64(st.BytesSent)/(1024*1024),
+							"transfer_rate_mbps", transferRate,
+							"literal_data_gb", float64(st.LiteralData)/(1024*1024*1024),
+							"matched_data_gb", float64(st.MatchedData)/(1024*1024*1024),
+							"initial_file_count", workerStats["file_count"],
+							"initial_total_size_gb", workerStats["total_size_gb"],
+							"initial_largest_file_gb", workerStats["largest_file_gb"],
+							"initial_smallest_file_mb", workerStats["smallest_file_mb"],
+							"initial_avg_file_mb", workerStats["avg_file_mb"])
+						
+						select {
+						case statsCh <- st:
+						case <-ctx.Done():
+							// Don't block if context is cancelled
+						}
+					} else {
+						slog.Error("worker stats parse error", "worker", widx, "error", err)
 					}
-				}
-				flush := false
-				if pending > 0 && (time.Since(lastFlush) > flushInterval || err == io.EOF) {
-					flush = true
-				}
-				if flush && bar != nil {
-					bar.IncrBy(pending)
-					pending = 0
-					lastFlush = time.Now()
-				}
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					break
+				} else {
+					slog.Error("worker log file read error", "worker", widx, "error", err)
 				}
 			}
-			if logFile != nil {
-				_ = logFile.Close()
-			}
-		}(stdout)
-
-		// Plain progress printer goroutine will be started once after launching all workers
-
-		// read stderr, log and collect for stats
-		wg.Add(1)
-		go func(r io.Reader) {
-			defer wg.Done()
-			sc := bufio.NewScanner(r)
-			for sc.Scan() {
-				line := sc.Text()
-				slog.Debug("rsync", "line", line)
-				statsMu.Lock()
-				statsBuf.WriteString(line)
-				statsBuf.WriteByte('\n')
-				statsMu.Unlock()
-			}
-			// parse stats after reading complete
-			if st, err := ParseStats(bufio.NewScanner(bytes.NewReader(statsBuf.Bytes()))); err == nil {
-				statsCh <- st
-			}
-		}(stderr)
-
-		wg.Add(1)
-		go func(c *exec.Cmd, widx int) {
-			defer wg.Done()
-			if err := c.Wait(); err != nil {
-				// ### DEBUG CODE: worker finished with error
-				// slog.Info("rsync worker done with error", "idx", widx, "err", err)
-				errCh <- err
-			}
-			// ### DEBUG CODE: worker finished successfully
-			// slog.Info("rsync worker done", "idx", widx, "err", nil)
-		}(cmd, idx)
+		}(rsyncCmd, startedAwkCommands, idx, logFile, map[string]interface{}{
+			"file_count": len(bucket),
+			"total_size_gb": float64(workerTotalSize)/(1024*1024*1024),
+			"largest_file_gb": float64(workerLargestFile)/(1024*1024*1024),
+			"smallest_file_mb": float64(workerSmallestFile)/(1024*1024),
+			"avg_file_mb": float64(workerTotalSize/int64(len(bucket)))/(1024*1024),
+		})
 	}
 
-	// Wait for all goroutines
-	done := make(chan struct{})
+	// Start goroutine to close shared pipes when all workers are done
 	go func() {
+		// Wait for all worker goroutines to finish
+		workersWG.Wait()
+		
+		// Close write ends of pipes to signal readers to finish
+		progressWriter.Close()
+		statsWriter.Close()
+		
+		// Now wait for readers to finish and signal completion
 		wg.Wait()
-		close(done)
+		close(workersFinished)
 	}()
 
 	var total Stats
@@ -299,7 +508,7 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 		return total, ctx.Err()
 	case err := <-errCh:
 		return total, err
-	case <-done:
+	case <-workersFinished:
 		// Complete the bar to exactly 100%
 		if bar != nil && p != nil {
 			// Calculate remaining bytes to reach 100%
@@ -310,10 +519,45 @@ func RunParallel(ctx context.Context, cfg Config, module string, workers int, fi
 			bar.SetTotal(totalBytes, true) // mark as complete
 			p.Wait()
 		}
+		
+		// Close statsCh and collect remaining stats with timeout protection
 		close(statsCh)
-		for st := range statsCh {
-			total = total.Add(st)
+		timeout := time.After(1 * time.Second)
+	statsLoop:
+		for {
+			select {
+			case st, ok := <-statsCh:
+				if !ok {
+					// Channel closed, no more stats
+					break statsLoop
+				}
+				total = total.Add(st)
+			case <-timeout:
+				// Timeout protection - don't wait forever for stats
+				break statsLoop
+			}
 		}
+		
+		// Use precise progress counter for BytesReceived instead of aggregated per-worker stats
+		// This prevents double counting and multiplication errors similar to bash implementation
+		progressMu.Lock()
+		accurateProgressBytes := progressBytes
+		progressMu.Unlock()
+		
+		if accurateProgressBytes > 0 {
+			// Override BytesReceived with the accurate progress counter
+			total.BytesReceived = accurateProgressBytes
+		}
+		
+		// Log summary statistics for all workers
+		slog.Info("all workers completed", 
+			"module", module,
+			"total_workers", workers,
+			"total_bytes_received_gb", float64(total.BytesReceived)/(1024*1024*1024),
+			"total_files_processed", total.NumFiles,
+			"total_files_transferred", total.RegTransferred,
+			"total_time_sec", time.Since(start).Seconds())
+		
 		return total, nil
 	}
 }
